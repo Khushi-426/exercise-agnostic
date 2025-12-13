@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Timer, ArrowLeft, StopCircle, Info, CheckCircle, 
-  ChevronRight, Activity, AlertCircle, Play, Dumbbell, Wifi, WifiOff 
+  Activity, AlertCircle, Play, Dumbbell, Wifi, WifiOff 
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from './context/AuthContext'; 
+// [Change] Import Socket.io Client
+import { io } from 'socket.io-client';
 
 // --- MOCK DATA: EXERCISE LIBRARY ---
 const EXERCISES = [
@@ -60,14 +62,83 @@ const Tracker = () => {
   const [sessionTime, setSessionTime] = useState(0);
   const [feedback, setFeedback] = useState("Initializing...");
   const [videoTimestamp, setVideoTimestamp] = useState(Date.now());
-  const [connectionStatus, setConnectionStatus] = useState('DISCONNECTED'); // CONNECTED, DISCONNECTED
+  const [connectionStatus, setConnectionStatus] = useState('DISCONNECTED');
   
   // Phase Specific States
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [countdownValue, setCountdownValue] = useState(null);
 
-  const intervalRef = useRef(null);
+  // [Change] Socket state
+  const [socket, setSocket] = useState(null);
+
   const timerRef = useRef(null);
+
+  // --- 1. SETUP SOCKET CONNECTION ---
+  useEffect(() => {
+    // Initialize socket connection on component mount
+    const newSocket = io('http://localhost:5000');
+    setSocket(newSocket);
+
+    newSocket.on('connect', () => {
+        console.log("WebSocket Connected");
+        setConnectionStatus('CONNECTED');
+    });
+
+    newSocket.on('disconnect', () => {
+        console.log("WebSocket Disconnected");
+        setConnectionStatus('DISCONNECTED');
+    });
+
+    newSocket.on('session_stopped', () => {
+         console.log("Session Stopped Confirmed");
+         navigate('/report');
+    });
+
+    // Listen for workout updates from the server
+    newSocket.on('workout_update', (json) => {
+        setData(json);
+        
+        // Handle Phases for UX
+        if (json.status === 'CALIBRATION') {
+            setFeedback(json.calibration?.message || "Calibrating...");
+            setCalibrationProgress(json.calibration?.progress || 0);
+            setCountdownValue(null);
+        } 
+        else if (json.status === 'COUNTDOWN') {
+            setFeedback("Get Ready!");
+            setCountdownValue(json.remaining);
+            setCalibrationProgress(100); 
+        } 
+        else if (json.status === 'ACTIVE') {
+            setCountdownValue(null);
+            let msg = "MAINTAIN FORM";
+            let color = "#76B041"; // Green
+
+            // Safely check for feedback messages
+            if (json.RIGHT && json.RIGHT.feedback) { 
+                msg = `RIGHT: ${json.RIGHT.feedback}`; 
+                color = "#D32F2F"; 
+            }
+            else if (json.LEFT && json.LEFT.feedback) { 
+                msg = `LEFT: ${json.LEFT.feedback}`; 
+                color = "#D32F2F"; 
+            }
+            
+            setFeedback(msg);
+            
+            // Direct DOM manipulation for performance on rapid updates
+            const fbBox = document.getElementById('feedback-box');
+            if(fbBox) {
+                fbBox.style.color = color;
+                fbBox.style.borderColor = color;
+            }
+        }
+    });
+
+    return () => {
+        newSocket.close();
+    };
+  }, [navigate]);
 
   // --- SESSION CONTROL FUNCTIONS ---
   const startSession = async () => {
@@ -81,14 +152,10 @@ const Tracker = () => {
           setVideoTimestamp(Date.now());
           setActive(true);
           setSessionTime(0);
-          setConnectionStatus('CONNECTED');
           
           // Clear any existing intervals
-          if(intervalRef.current) clearInterval(intervalRef.current);
           if(timerRef.current) clearInterval(timerRef.current);
 
-          // Polling for data
-          intervalRef.current = setInterval(fetchData, 100);
           // Session Timer
           timerRef.current = setInterval(() => setSessionTime(t => t + 1), 1000);
         }
@@ -98,71 +165,21 @@ const Tracker = () => {
     }
   };
 
-  const stopSession = async () => {
-    try {
-        // Updated to send Exercise Name!
-        await fetch('http://localhost:5000/stop_tracking', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                email: user?.email,
-                exercise: selectedExercise?.title || 'Freestyle' // SEND EXERCISE NAME
-            }) 
+  const stopSession = () => {
+    // [Change] Use Socket to stop session instantly (avoids HTTP blocking)
+    if(socket) {
+        socket.emit('stop_session', { 
+            email: user?.email,
+            exercise: selectedExercise?.title || 'Freestyle' 
         });
-    } catch(e) { console.error("Error stopping session:", e) }
-    
-    setActive(false);
-    clearInterval(intervalRef.current);
-    clearInterval(timerRef.current);
-    navigate('/report');
-  };
-
-  const fetchData = async () => {
-    try {
-      const res = await fetch('http://localhost:5000/data_feed');
-      if (!res.ok) throw new Error('Network response was not ok');
-      const json = await res.json();
-      
-      setConnectionStatus('CONNECTED');
-      setData(json);
-      
-      // Handle Phases for UX
-      if (json.status === 'CALIBRATION') {
-          setFeedback(json.calibration?.message || "Calibrating...");
-          setCalibrationProgress(json.calibration?.progress || 0);
-          setCountdownValue(null);
-      } 
-      else if (json.status === 'COUNTDOWN') {
-          setFeedback("Get Ready!");
-          setCountdownValue(json.remaining);
-          setCalibrationProgress(100); 
-      } 
-      else if (json.status === 'ACTIVE') {
-          setCountdownValue(null);
-          let msg = "MAINTAIN FORM";
-          let color = "#76B041"; // Green
-
-          if (json.RIGHT.feedback) { msg = `RIGHT: ${json.RIGHT.feedback}`; color = "#D32F2F"; }
-          else if (json.LEFT.feedback) { msg = `LEFT: ${json.LEFT.feedback}`; color = "#D32F2F"; }
-          
-          setFeedback(msg);
-          
-          // Direct DOM manipulation for performance on rapid updates
-          const fbBox = document.getElementById('feedback-box');
-          if(fbBox) {
-              fbBox.style.color = color;
-              fbBox.style.borderColor = color;
-          }
-      }
-    } catch (err) { 
-        console.error(err);
-        setConnectionStatus('DISCONNECTED');
     }
+    setActive(false);
+    clearInterval(timerRef.current);
+    // Navigation is handled in the 'session_stopped' listener
   };
 
   useEffect(() => {
     return () => { 
-        clearInterval(intervalRef.current); 
         clearInterval(timerRef.current); 
     }
   }, []);
