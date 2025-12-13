@@ -2,11 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
   Timer, ArrowLeft, StopCircle, Info, CheckCircle, 
-  Activity, AlertCircle, Play, Dumbbell, Wifi, WifiOff 
+  Activity, AlertCircle, Play, Dumbbell, Wifi, WifiOff, Volume2, VolumeX, User
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from './context/AuthContext'; 
-// [Change] Import Socket.io Client
 import { io } from 'socket.io-client';
 
 // --- MOCK DATA: EXERCISE LIBRARY ---
@@ -48,6 +47,18 @@ const EXERCISES = [
   }
 ];
 
+// --- UTILITY: TTS ---
+const speak = (text) => {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel(); // Prioritize new message
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 1.1; 
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    window.speechSynthesis.speak(utterance);
+};
+
 const Tracker = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -56,26 +67,25 @@ const Tracker = () => {
   const [viewMode, setViewMode] = useState('LIBRARY'); 
   const [selectedExercise, setSelectedExercise] = useState(null);
   
-  // Tracker Logic States
   const [active, setActive] = useState(false);
   const [data, setData] = useState(null);
   const [sessionTime, setSessionTime] = useState(0);
   const [feedback, setFeedback] = useState("Initializing...");
   const [videoTimestamp, setVideoTimestamp] = useState(Date.now());
   const [connectionStatus, setConnectionStatus] = useState('DISCONNECTED');
+  const [soundEnabled, setSoundEnabled] = useState(true);
   
-  // Phase Specific States
   const [calibrationProgress, setCalibrationProgress] = useState(0);
   const [countdownValue, setCountdownValue] = useState(null);
 
-  // [Change] Socket state
   const [socket, setSocket] = useState(null);
-
   const timerRef = useRef(null);
+  
+  // Audio Ref to prevent repeats
+  const lastSpokenRef = useRef("");
 
   // --- 1. SETUP SOCKET CONNECTION ---
   useEffect(() => {
-    // Initialize socket connection on component mount
     const newSocket = io('http://localhost:5000');
     setSocket(newSocket);
 
@@ -85,62 +95,92 @@ const Tracker = () => {
     });
 
     newSocket.on('disconnect', () => {
-        console.log("WebSocket Disconnected");
         setConnectionStatus('DISCONNECTED');
     });
 
     newSocket.on('session_stopped', () => {
-         console.log("Session Stopped Confirmed");
          navigate('/report');
     });
 
-    // Listen for workout updates from the server
     newSocket.on('workout_update', (json) => {
         setData(json);
-        
-        // Handle Phases for UX
-        if (json.status === 'CALIBRATION') {
-            setFeedback(json.calibration?.message || "Calibrating...");
-            setCalibrationProgress(json.calibration?.progress || 0);
-            setCountdownValue(null);
-        } 
-        else if (json.status === 'COUNTDOWN') {
-            setFeedback("Get Ready!");
-            setCountdownValue(json.remaining);
-            setCalibrationProgress(100); 
-        } 
-        else if (json.status === 'ACTIVE') {
-            setCountdownValue(null);
-            let msg = "MAINTAIN FORM";
-            let color = "#76B041"; // Green
-
-            // Safely check for feedback messages
-            if (json.RIGHT && json.RIGHT.feedback) { 
-                msg = `RIGHT: ${json.RIGHT.feedback}`; 
-                color = "#D32F2F"; 
-            }
-            else if (json.LEFT && json.LEFT.feedback) { 
-                msg = `LEFT: ${json.LEFT.feedback}`; 
-                color = "#D32F2F"; 
-            }
-            
-            setFeedback(msg);
-            
-            // Direct DOM manipulation for performance on rapid updates
-            const fbBox = document.getElementById('feedback-box');
-            if(fbBox) {
-                fbBox.style.color = color;
-                fbBox.style.borderColor = color;
-            }
-        }
+        handleWorkoutUpdate(json);
     });
 
     return () => {
         newSocket.close();
+        window.speechSynthesis.cancel();
     };
-  }, [navigate]);
+  }, [navigate]); 
 
-  // --- SESSION CONTROL FUNCTIONS ---
+  // --- 2. LOGIC HANDLER (TTS & Phases) ---
+  const handleWorkoutUpdate = (json) => {
+      // CALIBRATION
+      if (json.status === 'CALIBRATION') {
+          setFeedback(json.calibration?.message || "Calibrating...");
+          setCalibrationProgress(json.calibration?.progress || 0);
+          setCountdownValue(null);
+          
+          if (json.calibration?.message) {
+               triggerSpeech(json.calibration.message);
+          }
+      } 
+      // COUNTDOWN
+      else if (json.status === 'COUNTDOWN') {
+          setFeedback("Get Ready!");
+          setCountdownValue(json.remaining);
+          setCalibrationProgress(100);
+          
+          if (json.remaining <= 3 && json.remaining > 0) {
+              triggerSpeech(json.remaining.toString());
+          } else if (json.remaining === 0) {
+              triggerSpeech("Start");
+          }
+      } 
+      // ACTIVE
+      else if (json.status === 'ACTIVE') {
+          setCountdownValue(null);
+          let msg = "MAINTAIN FORM";
+          let color = "#76B041"; // Green
+          let alertMsg = "";
+
+          // Prioritize error feedback
+          if (json.RIGHT && json.RIGHT.feedback) { 
+              msg = `RIGHT: ${json.RIGHT.feedback}`; 
+              alertMsg = json.RIGHT.feedback;
+              color = "#D32F2F"; 
+          }
+          else if (json.LEFT && json.LEFT.feedback) { 
+              msg = `LEFT: ${json.LEFT.feedback}`; 
+              alertMsg = json.LEFT.feedback;
+              color = "#D32F2F"; 
+          }
+          
+          setFeedback(msg);
+          
+          // Trigger Audio ONLY if message changes (Strict)
+          if (alertMsg) {
+              triggerSpeech(alertMsg);
+          }
+
+          const fbBox = document.getElementById('feedback-box');
+          if(fbBox) {
+              fbBox.style.color = color;
+              fbBox.style.borderColor = color;
+          }
+      }
+  };
+
+  const triggerSpeech = (text) => {
+      if (!soundEnabled) return;
+      // STRICT: Only speak if text is DIFFERENT from last spoken
+      if (text !== lastSpokenRef.current) {
+          speak(text);
+          lastSpokenRef.current = text;
+      }
+  };
+
+  // --- SESSION CONTROL ---
   const startSession = async () => {
     try {
         setConnectionStatus('CONNECTING');
@@ -152,21 +192,18 @@ const Tracker = () => {
           setVideoTimestamp(Date.now());
           setActive(true);
           setSessionTime(0);
+          speak("Initializing. Please align with the skeleton.");
           
-          // Clear any existing intervals
           if(timerRef.current) clearInterval(timerRef.current);
-
-          // Session Timer
           timerRef.current = setInterval(() => setSessionTime(t => t + 1), 1000);
         }
     } catch (e) {
-        alert("Could not connect to AI Server. Please ensure 'app.py' is running.");
+        alert("Could not connect to AI Server.");
         setConnectionStatus('DISCONNECTED');
     }
   };
 
   const stopSession = () => {
-    // [Change] Use Socket to stop session instantly (avoids HTTP blocking)
     if(socket) {
         socket.emit('stop_session', { 
             email: user?.email,
@@ -175,14 +212,7 @@ const Tracker = () => {
     }
     setActive(false);
     clearInterval(timerRef.current);
-    // Navigation is handled in the 'session_stopped' listener
   };
-
-  useEffect(() => {
-    return () => { 
-        clearInterval(timerRef.current); 
-    }
-  }, []);
 
   const formatTime = (s) => {
     const mins = Math.floor(s / 60);
@@ -190,7 +220,7 @@ const Tracker = () => {
     return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
   };
 
-  // --- VIEW 1: EXERCISE LIBRARY ---
+  // --- RENDER LIBRARY ---
   const renderLibrary = () => (
     <motion.div 
       initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
@@ -268,7 +298,7 @@ const Tracker = () => {
     </motion.div>
   );
 
-  // --- VIEW 2: DEMO & INSTRUCTIONS ---
+  // --- RENDER DEMO ---
   const renderDemo = () => (
     <motion.div 
       initial={{ opacity: 0, x: 50 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -50 }}
@@ -309,7 +339,7 @@ const Tracker = () => {
             <button 
                 onClick={() => { 
                     if (!user) {
-                        alert("You must be logged in to start a training session.");
+                        alert("Please login to start.");
                         navigate('/auth/login');
                         return;
                     }
@@ -341,30 +371,35 @@ const Tracker = () => {
             playsInline
             style={{ width: '100%', height: '100%', objectFit: 'contain' }} 
           />
-          <div style={{ position: 'absolute', top: '30px', right: '30px', background: 'rgba(0,0,0,0.6)', padding: '10px 20px', borderRadius: '30px', color: '#fff', backdropFilter: 'blur(10px)', display: 'flex', alignItems: 'center', gap: '10px' }}>
-             <Activity size={18} color="#69B341" /> Demo Mode
-          </div>
       </div>
     </motion.div>
   );
 
-  // --- VIEW 3: ACTIVE SESSION ---
+  // --- RENDER SESSION ---
   const renderSession = () => (
     <motion.div 
       initial={{ opacity: 0 }} animate={{ opacity: 1 }}
       style={{ height: '100vh', display: 'flex', overflow: 'hidden', background: 'var(--bg-color)' }}
     >
-      {/* Sidebar: Metrics */}
+      {/* Sidebar */}
       <div style={{ width: '340px', background: '#fff', borderRight: '1px solid #eee', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
         
-        {/* Header */}
         <div style={{ padding: '30px', borderBottom: '1px solid #eee', textAlign: 'center' }}>
           <div style={{ fontSize: '0.8rem', color: '#888', fontWeight: '700', letterSpacing: '1px', marginBottom: '8px', textTransform: 'uppercase', display: 'flex', justifyContent: 'space-between' }}>
             <span>{selectedExercise?.title}</span>
-            {connectionStatus === 'CONNECTED' ? 
-               <Wifi size={16} color="#69B341" title="Connected" /> : 
-               <WifiOff size={16} color="#D32F2F" title="Disconnected" />
-            }
+            <div style={{ display: 'flex', gap: '10px' }}>
+                <button 
+                    onClick={() => setSoundEnabled(!soundEnabled)}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: soundEnabled ? '#2C5D31' : '#ccc' }}
+                    title={soundEnabled ? "Mute Voice" : "Enable Voice"}
+                >
+                    {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
+                </button>
+                {connectionStatus === 'CONNECTED' ? 
+                <Wifi size={16} color="#69B341" title="Connected" /> : 
+                <WifiOff size={16} color="#D32F2F" title="Disconnected" />
+                }
+            </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', color: '#2C5D31', fontSize: '2.5rem', fontWeight: '800' }}>
             <Timer size={32} />
@@ -372,7 +407,6 @@ const Tracker = () => {
           </div>
         </div>
 
-        {/* Real-time Data */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '25px' }}>
             {['RIGHT', 'LEFT'].map(arm => {
                 const metrics = data ? data[arm] : null;
@@ -392,7 +426,6 @@ const Tracker = () => {
                             <div style={{ fontSize: '2.2rem', fontWeight: '800', fontFamily: 'monospace', color: '#222' }}>{metrics ? metrics.angle : '--'}°</div>
                         </div>
                     </div>
-                    {/* Visual Bar */}
                     <div style={{ height: '6px', background: '#e0e0e0', borderRadius: '4px', overflow: 'hidden' }}>
                         <div style={{ width: metrics ? `${(metrics.angle / 180) * 100}%` : '0%', height: '100%', background: '#2C5D31', transition: 'width 0.1s linear' }} />
                     </div>
@@ -400,7 +433,6 @@ const Tracker = () => {
             )})}
         </div>
 
-        {/* Stop Button */}
         <div style={{ padding: '25px', borderTop: '1px solid #eee' }}>
             <button 
                 onClick={stopSession}
@@ -432,19 +464,34 @@ const Tracker = () => {
                 </div>
             )}
 
+            {/* REFERENCE SKELETON OVERLAY (For Calibration) */}
+            {data?.status === 'CALIBRATION' && (
+                <div style={{
+                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                    width: '300px', height: '500px', pointerEvents: 'none', opacity: 0.6,
+                    border: '4px dashed rgba(255,255,255,0.5)', borderRadius: '150px 150px 0 0',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                }}>
+                    <User size={120} color="rgba(255,255,255,0.5)" />
+                    <div style={{ position: 'absolute', bottom: '-40px', color: '#fff', background: 'rgba(0,0,0,0.5)', padding: '5px 10px', borderRadius: '10px' }}>
+                        Align Here
+                    </div>
+                </div>
+            )}
+
             {/* OVERLAYS */}
             <AnimatePresence>
-                {/* 1. CALIBRATION OVERLAY */}
+                {/* 1. CALIBRATION OVERLAY - TRANSPARENT NOW */}
                 {data?.status === 'CALIBRATION' && (
                     <motion.div 
                         initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                         style={{
-                            position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)',
-                            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                            backdropFilter: 'blur(5px)'
+                            position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.1)', // More Transparent
+                            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start',
+                            paddingTop: '50px'
                         }}
                     >
-                        <h2 style={{ color: '#fff', fontSize: '2rem', marginBottom: '20px', textShadow: '0 2px 10px rgba(0,0,0,0.5)' }}>
+                        <h2 style={{ color: '#fff', fontSize: '2rem', marginBottom: '20px', textShadow: '0 2px 10px rgba(0,0,0,0.8)' }}>
                             {feedback}
                         </h2>
                         <div style={{ width: '60%', height: '12px', background: 'rgba(255,255,255,0.2)', borderRadius: '6px', overflow: 'hidden' }}>
@@ -453,7 +500,6 @@ const Tracker = () => {
                                 style={{ height: '100%', background: '#00E676' }}
                             />
                         </div>
-                        <p style={{ color: '#ccc', marginTop: '10px' }}>{calibrationProgress}% Complete</p>
                     </motion.div>
                 )}
 

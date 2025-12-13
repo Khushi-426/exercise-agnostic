@@ -1,5 +1,5 @@
 """
-Main workout session manager
+Main workout session manager - OPTIMIZED VIDEO FEED
 """
 import cv2
 import mediapipe as mp
@@ -116,14 +116,14 @@ class WorkoutSession:
         elif self.phase == WorkoutPhase.ACTIVE:
             self._process_workout(results, current_time)
         
-        # Draw landmarks
+        # Draw landmarks (Skeleton Lines)
         if results.pose_landmarks:
             mp.solutions.drawing_utils.draw_landmarks(
                 image, results.pose_landmarks, 
                 mp.solutions.pose.POSE_CONNECTIONS
             )
         
-        # Draw UI overlays
+        # Draw UI overlays (Minimal - mostly handled by frontend now)
         image = self._draw_ui(image, results)
         
         return image, True
@@ -177,23 +177,15 @@ class WorkoutSession:
         
         h, w, _ = image.shape
         
-        # Flip image first for proper text orientation
+        # Flip image first for proper orientation (Mirror Effect)
         image = cv2.flip(image, 1)
         
-        if self.phase == WorkoutPhase.CALIBRATION:
-            cv2.putText(image, self.calibration_manager.data.message, 
-                       (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            
-            # Progress bar
-            progress = self.calibration_manager.data.progress
-            bar_width = int((progress / 100) * (w - 40))
-            cv2.rectangle(image, (20, h - 60), (20 + bar_width, h - 40), (0, 255, 0), -1)
-            cv2.rectangle(image, (20, h - 60), (w - 20, h - 40), (255, 255, 255), 2)
+        # [CHANGE] Removed the RED COUNTDOWN drawing logic.
+        # Frontend now handles all counters and text overlays for a cleaner look.
         
-        elif self.phase == WorkoutPhase.COUNTDOWN:
-            cv2.putText(image, str(self.countdown_remaining), 
-                       (int(w/2)-50, int(h/2)), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 0, 255), 5)
+        if self.phase == WorkoutPhase.CALIBRATION:
+            # Minimal backend UI for calibration (Frontend has the main overlay)
+            pass
         
         return image
     
